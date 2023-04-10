@@ -1,5 +1,8 @@
 %% -*- erlang -*-
 
+%% Trivially parallel, as it runs each prime-sieve in a separate
+%% process.
+
 -module('PrimeErlang').
 
 -export([main/1]).
@@ -34,16 +37,40 @@ main([]) ->
 main([Arg]) ->
   N = list_to_integer(Arg),
   T0 = os:system_time(nanosecond),
-  Limit = erlang:convert_time_unit(5, second, nanosecond),
-  Iterations = do_main(T0, Limit, N, 0),
+  Threads = erlang:system_info(schedulers),
+  Parent = self(),
+
+  %% Spawn one process per scheduler
+  Pids = lists:map(fun(_) -> spawn(fun() -> sieve_proc(N) end) end, lists:seq(1, Threads)),
+
+  %% Wait 5 seconds
+  timer:sleep(5000),
+
+  %% Tell each process to stop
+  lists:foreach(fun(Pid) -> Pid ! {stop, Parent} end, Pids),
+
+  %% Wait for each process to report number of iterations
+  Iterations =
+    lists:foldl(fun(_, Acc) ->
+                   receive
+                     {iter, Iter} ->
+                       Acc + Iter
+                   end
+                end,
+                0,
+                Pids),
+
+  %% Sum up the total time spent
   T1 = os:system_time(nanosecond),
   TotalTime = (T1 - T0) / 1_000_000_000.0,
+
   NumThread = 1,
-  Label = "jesperes",
+  Label = "jesperes-parallel",
   Tags =
     #{algorithm => base,
       faithful => yes,
       bits => 64},
+
   io:format("~s;~w;~g;~w;~s~n",
             [Label,
              Iterations,
@@ -53,15 +80,17 @@ main([Arg]) ->
                         lists:map(fun({K, V}) -> io_lib:format("~w=~w", [K, V]) end,
                                   maps:to_list(Tags)))]).
 
-do_main(T0, Limit, N, NIter) ->
-  T1 = os:system_time(nanosecond),
-  Elapsed = T1 - T0,
-  if Elapsed > Limit ->
-       NIter;
-     true ->
-       NumPrimes = run_sieve(N),
-       ?assertEqual(NumPrimes, num_primes(N)),
-       do_main(T0, Limit, N, NIter + 1)
+sieve_proc(N) ->
+  sieve_proc(N, 0).
+
+sieve_proc(N, Iter) ->
+  NumPrimes = run_sieve(N),
+  ?assertEqual(NumPrimes, num_primes(N)),
+  receive
+    {stop, Pid} ->
+      Pid ! {iter, Iter}
+  after 0 ->
+    sieve_proc(N, Iter + 1)
   end.
 
 %% -- Implementation --
